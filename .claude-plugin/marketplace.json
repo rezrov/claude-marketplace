@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "rezrov-marketplace",
+  "description": "Claude Code plugins and skills published by rezrov",
+  "owner": {
+    "name": "Ron Fritz",
+    "email": "fritz@iron.blue"
+  },
+  "plugins": [
+    {
+      "name": "kitty-cli-display-image",
+      "source": "./plugins/kitty-cli-display-image",
+      "description": "Display images in the terminal via the Kitty graphics protocol",
+      "category": "terminal",
+      "tags": ["kitty", "image", "display"]
+    },
+    {
+      "name": "paperboy",
+      "source": "./plugins/paperboy",
+      "description": "Fetch, filter, and summarize RSS/news sources into a daily Obsidian-vault digest",
+      "category": "productivity",
+      "tags": ["rss", "news", "obsidian", "digest"]
+    }
+  ]
+}

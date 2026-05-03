@@ -1,0 +1,10 @@
+{
+  "name": "paperboy",
+  "description": "Fetch, filter, and summarize RSS/news sources into a daily Obsidian-vault digest",
+  "version": "1.0.0",
+  "author": {
+    "name": "Ron Fritz"
+  },
+  "license": "MIT",
+  "keywords": ["rss", "news", "obsidian", "digest", "paperboy", "feed"]
+}
