@@ -80,7 +80,12 @@ The script prints a JSON object `{fetched_at, vault, candidates: [...], errors: 
 
 Read `/tmp/paperboy-candidates.json`. If `candidates` is empty, tell the user "Nothing new since the last run." Do not write a digest file or call finalize. Stop here.
 
-If `errors` is non-empty, list the failing sources for the user but continue with whatever succeeded.
+If `errors` is non-empty, classify each entry before continuing:
+
+- **Transient errors** — network timeout, DNS failure, 5xx response, occasional connection refused. Likely to resolve on a later run; mention them to the user but treat as recoverable.
+- **Unsupported sources** — paperboy's current tooling can't handle the source. Signals: the declared `type` in `sources.md` is not one of `rss`, `1440-sitemap`, or `reddit-sub`; the feed responds but doesn't parse as the declared type (e.g., an `rss` source returning Atom or HTML); fetch.py reports a structural extraction failure.
+
+Track the slugs of unsupported sources in `unsupported_sources` — Steps 7 and 9 use this list to direct the user to <https://github.com/rezrov/claude-marketplace/issues> to request official support for the new format. Continue the run regardless; no error type blocks other sources.
 
 #### Step 3 — Load interests
 
@@ -148,6 +153,14 @@ Fetched N candidates across M sources, kept K.
 
 Order items: most recently published first; items with unknown publish date go at the end.
 
+**Unsupported-source notice:** if `unsupported_sources` from Step 2 is non-empty, insert a notice block immediately after the "Fetched N candidates..." line and before the first `---` divider. Format:
+
+```markdown
+> **Heads up:** paperboy couldn't handle the source(s) `<slug1>`, `<slug2>` with the current version of the skill. To request official support for new source types or feed formats, file an issue at <https://github.com/rezrov/claude-marketplace/issues>.
+```
+
+List every slug in `unsupported_sources`, comma-separated, each in backticks. Omit the block entirely when `unsupported_sources` is empty.
+
 **Source rendering:**
 - Render source slugs as friendly names: `hn-*` → `HN`, `lobsters-*` → `Lobsters`, `csm-*` → `CSM`, `1440` → `1440`, `reddit-*` → `r/<subreddit>` (extract `<subreddit>` from the candidate's `discussion_url`, which has the form `https://www.reddit.com/r/<sub>/comments/...` — preserve the original casing).
 - If the candidate has a `discussion_url` field, link the friendly name to that URL: `[HN](https://news.ycombinator.com/item?id=...)`. (For HN/Lobsters this is the post's discussion page; for 1440 it's the newsletter page; for Reddit it's the comments page.)
@@ -193,6 +206,7 @@ Tell the user:
 - Where the digest was written (full path)
 - Count of kept vs skipped
 - Any source fetch errors
+- **If `unsupported_sources` is non-empty:** explicitly state which source slug(s) paperboy couldn't handle and direct the user to <https://github.com/rezrov/claude-marketplace/issues> to request official support. This duplicates the digest notice intentionally — the user sees it in chat whether or not they open the digest.
 
 Do not open the file or summarize its contents — the user will read it in Obsidian.
 
@@ -219,6 +233,7 @@ This launches/focuses Obsidian on the vault using its registered name (the vault
 
 - **Vault missing**: run init.py, offer to let user review seeds before continuing
 - **Source fetch fails (network/parse)**: skip source, record in `errors[]`, continue — do not fail the run
+- **Unsupported source** (unknown `type`, parse mismatch, structural extraction failure): track in `unsupported_sources`; surface in the digest's top notice (Step 7) and the chat report (Step 9) with a link to <https://github.com/rezrov/claude-marketplace/issues> to request official support. Never blocks other sources.
 - **Classifier output malformed**: re-prompt once, then skip that candidate with "classifier error" rationale
 - **Article fetch fails**: fall back to RSS description; note "summary from feed description" in the digest
 - **Digest write fails**: do NOT call finalize — next run will re-fetch the same items
