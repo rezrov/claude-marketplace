@@ -66,8 +66,14 @@ SITEMAP_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
 RSS_DESC_MAX_CHARS = 600
 
 
-def parse_sources_md(path: Path) -> list[dict]:
-    sources = []
+def parse_sources_md(path: Path) -> tuple[list[dict], list[dict], list[dict]]:
+    """Returns (active_sources, alternates, paywall_domains).
+
+    Entries with type 'alternate' or 'paywall' are not scanned for news —
+    they are passed through to the JSON output so the agent can consult them
+    in the paywall-handling step.
+    """
+    sources, alternates, paywalls = [], [], []
     for raw in path.read_text().splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or not line.startswith("-"):
@@ -76,8 +82,14 @@ def parse_sources_md(path: Path) -> list[dict]:
         parts = [p.strip() for p in body.split("|")]
         if len(parts) < 3:
             continue
-        sources.append({"slug": parts[0], "url": parts[1], "type": parts[2]})
-    return sources
+        entry = {"slug": parts[0], "url": parts[1], "type": parts[2]}
+        if entry["type"] == "alternate":
+            alternates.append(entry)
+        elif entry["type"] == "paywall":
+            paywalls.append(entry)
+        else:
+            sources.append(entry)
+    return sources, alternates, paywalls
 
 
 def _text(el, tag) -> str:
@@ -379,7 +391,9 @@ def main() -> int:
     candidates: list[dict] = []
     errors: list[dict] = []
 
-    for source in parse_sources_md(sources_md):
+    sources, alternates, paywall_domains = parse_sources_md(sources_md)
+
+    for source in sources:
         slug = source["slug"]
         handler = SOURCE_HANDLERS.get(source.get("type", "rss"))
         if handler is None:
@@ -401,6 +415,8 @@ def main() -> int:
         "vault": str(VAULT),
         "candidates": candidates,
         "errors": errors,
+        "alternates": alternates,
+        "paywall_domains": paywall_domains,
     }
     json.dump(result, sys.stdout, indent=2)
     return 0

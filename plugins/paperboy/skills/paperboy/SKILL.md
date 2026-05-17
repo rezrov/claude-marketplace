@@ -1,7 +1,7 @@
 ---
 name: paperboy
 description: Fetch, filter, and summarize news/articles from configured RSS sources into a daily markdown digest in an Obsidian vault. Trigger with "fetch my newspaper", "run paperboy", "check my feed".
-allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/*) Bash(python3 *) Bash(date *) Bash(mkdir *) Bash(test *) Bash(ls *) Bash(grep *) Bash(find *) Bash(awk *) Bash(wc *) Bash(cat *) Bash(echo *) Bash(basename *) Bash(open obsidian://*) Read Write WebFetch
+allowed-tools: Bash(${CLAUDE_SKILL_DIR}/scripts/*) Bash(python3 *) Bash(date *) Bash(mkdir *) Bash(test *) Bash(ls *) Bash(grep *) Bash(find *) Bash(awk *) Bash(wc *) Bash(cat *) Bash(echo *) Bash(basename *) Bash(open obsidian://*) Read Write WebFetch WebSearch
 ---
 
 ## What I do
@@ -11,17 +11,18 @@ I fetch news from the user's configured sources (RSS feeds and the 1440 daily ne
 ### Source types
 
 - `rss` — standard RSS 2.0 feed; one candidate per `<item>`.
-- `1440-sitemap` — the 1440 daily newsletter; URL points to a sitemap.xml. fetch.py walks the sitemap, fetches each newsletter page in the backfill window, and parses the "Need To Know" section into per-blurb candidates. These candidates come **pre-summarized** with inline citation links to the underlying source articles, so Step 6 (summarize) is short-circuited for them.
+- `1440-sitemap` — the 1440 daily newsletter; URL points to a sitemap.xml. fetch.py walks the sitemap, fetches each newsletter page in the backfill window, and parses the "Need To Know" section into per-blurb candidates. These candidates come **pre-summarized** with inline citation links to the underlying source articles, so Step 7 (summarize) is short-circuited for them.
 - `reddit-sub` — a subreddit listing. URL is a subreddit page (e.g., `https://www.reddit.com/r/<sub>/`); fetch.py converts it to the equivalent `.json` endpoint and parses each post as a candidate. A bare subreddit URL defaults to top-of-day; users can override by appending a listing path (`/hot/`, `/new/`, `/rising/`, `/top/`, `/controversial/`). Reddit posts are polymorphic — fetch.py routes the `url` field to whatever WebFetch can actually summarize: external article for link posts; `old.reddit.com/<permalink>` for self-text, image, video, or reddit-hosted media posts. The user-facing reddit.com comments page is always exposed as `discussion_url`.
 
 ### Workflow
 
 1. **Locate vault** at `$PAPERBOY_VAULT_DIR` (default `~/Documents/PaperboyVault`). If missing, run init to seed it.
-2. **Fetch candidates** via `scripts/fetch.py` — returns JSON of new-to-us items across all sources.
+2. **Fetch candidates** via `scripts/fetch.py` — returns JSON of new-to-us items across all sources, plus the user's `alternates` and `paywall_domains` lists for step 5.
 3. **Classify** each candidate against `interests.md` using LLM judgment. Output keep/skip + one-line rationale.
-4. **Summarize** each keeper by fetching the article URL via `WebFetch` and writing a 2-4 sentence summary.
-5. **Write digest** to `feed/YYYY-MM-DD-HHMMSS.md`.
-6. **Finalize state** via `scripts/finalize.py` — commits all fetched item IDs as "seen" so they won't resurface.
+4. **Paywall handling** — for keepers whose URL is on a paywall domain, `WebSearch` for the same story at a non-paywalled source (preferring the user's listed alternates) and swap to it.
+5. **Summarize** each keeper by fetching the (possibly alternate) article URL via `WebFetch` and writing a 2-4 sentence summary.
+6. **Write digest** to `feed/YYYY-MM-DD-HHMMSS.md`.
+7. **Finalize state** via `scripts/finalize.py` — commits all fetched item IDs as "seen" so they won't resurface.
 
 ### Vault layout
 
@@ -39,7 +40,7 @@ $PAPERBOY_VAULT_DIR/
 
 - User says "fetch my newspaper", "run paperboy", "check my news feed", "what's new"
 - User wants an LLM-filtered aggregation of their news sources
-- If the request also includes a "show me" / "open it" / "show it to me" intent, also run Step 10 to open the vault in Obsidian
+- If the request also includes a "show me" / "open it" / "show it to me" intent, also run Step 11 to open the vault in Obsidian
 
 ## How to use me
 
@@ -59,7 +60,7 @@ Check for `<vault>/sources.md`. If it exists, the vault is initialized — proce
 2. Tell them the resolved vault path and the two env vars that influence behavior, with defaults:
    - `PAPERBOY_VAULT_DIR` (default `~/Documents/PaperboyVault`) — vault location. To use a different path, the user should set this env var and re-run.
    - `PAPERBOY_BACKFILL_DAYS` (default `7`) — lookback window: caps first-run pulls and rejects items older than this on every run. Most users leave it.
-3. Note that paperboy is designed for **Obsidian** — link rendering and the optional "open it" step (Step 10) assume a vault opened there. **Obsidian is not required**, though: the digest is plain markdown and any markdown reader works. Step 10 is skipped automatically when the user hasn't asked to view the digest.
+3. Note that paperboy is designed for **Obsidian** — link rendering and the optional "open it" step (Step 11) assume a vault opened there. **Obsidian is not required**, though: the digest is plain markdown and any markdown reader works. Step 11 is skipped automatically when the user hasn't asked to view the digest.
 4. Run init:
    ```bash
    python3 "${CLAUDE_SKILL_DIR}/scripts/init.py"
@@ -76,7 +77,7 @@ Check for `<vault>/sources.md`. If it exists, the vault is initialized — proce
 python3 "${CLAUDE_SKILL_DIR}/scripts/fetch.py" > /tmp/paperboy-candidates.json
 ```
 
-The script prints a JSON object `{fetched_at, vault, candidates: [...], errors: [...]}` to stdout. Each candidate has: `source`, `id`, `title`, `url`, `published` (raw RFC 822 or ISO), `pub_iso` (ISO 8601 or null), `description`. Optional fields: `discussion_url` (set when the source has a discussion/landing page for the item), `pre_summarized` (true for 1440 blurbs — skip Step 6's WebFetch), `citations` (list of `[text, url]` pairs for pre-summarized items).
+The script prints a JSON object `{fetched_at, vault, candidates: [...], errors: [...], alternates: [...], paywall_domains: [...]}` to stdout. Each candidate has: `source`, `id`, `title`, `url`, `published` (raw RFC 822 or ISO), `pub_iso` (ISO 8601 or null), `description`. Optional fields: `discussion_url` (set when the source has a discussion/landing page for the item), `pre_summarized` (true for 1440 blurbs — skip Step 7's WebFetch), `citations` (list of `[text, url]` pairs for pre-summarized items). `alternates` and `paywall_domains` carry the user's `alternate` / `paywall` entries from `sources.md` (each an object with `slug`, `url`, `type`) — used in Step 6.
 
 Read `/tmp/paperboy-candidates.json`. If `candidates` is empty, tell the user "Nothing new since the last run." Do not write a digest file or call finalize. Stop here.
 
@@ -85,7 +86,7 @@ If `errors` is non-empty, classify each entry before continuing:
 - **Transient errors** — network timeout, DNS failure, 5xx response, occasional connection refused. Likely to resolve on a later run; mention them to the user but treat as recoverable.
 - **Unsupported sources** — paperboy's current tooling can't handle the source. Signals: the declared `type` in `sources.md` is not one of `rss`, `1440-sitemap`, or `reddit-sub`; the feed responds but doesn't parse as the declared type (e.g., an `rss` source returning Atom or HTML); fetch.py reports a structural extraction failure.
 
-Track the slugs of unsupported sources in `unsupported_sources` — Steps 7 and 9 use this list to direct the user to <https://github.com/rezrov/claude-marketplace/issues> to request official support for the new format. Continue the run regardless; no error type blocks other sources.
+Track the slugs of unsupported sources in `unsupported_sources` — Steps 8 and 10 use this list to direct the user to <https://github.com/rezrov/claude-marketplace/issues> to request official support for the new format. Continue the run regardless; no error type blocks other sources.
 
 #### Step 3 — Load interests
 
@@ -101,8 +102,8 @@ Before classifying, merge candidates that point to the same external article so 
 - **When two or more candidates share a normalized URL**: collapse them into a single merged candidate.
   - **Keep**: the earliest known `pub_iso` (fall back to any non-null one), the longest non-empty `title`, and the longest non-empty `description`.
   - **Combine**: collect every contributing source's slug + `discussion_url` into a list on the merged candidate (e.g., `sources: [{slug: "hn-frontpage", discussion_url: "..."}, {slug: "lobsters-feed", discussion_url: "..."}]`). Preserve order: earliest `pub_iso` first.
-  - **IDs**: remember every original `id` per source — finalize (Step 7) must mark them all seen so neither source resurfaces the article.
-- The merged candidate flows through Steps 5–6 as one item: one classify decision, one summary, one digest entry. The **Source:** line in Step 6 then renders every contributing source separately, each linked to its own `discussion_url` (e.g., `[HN](hn-url), [Lobsters](lobsters-url)`), per the source-rendering rule below.
+  - **IDs**: remember every original `id` per source — finalize (Step 9) must mark them all seen so neither source resurfaces the article.
+- The merged candidate flows through all subsequent steps as one item: one classify decision, one paywall check, one summary, one digest entry. The **Source:** line in Step 8 then renders every contributing source separately, each linked to its own `discussion_url` (e.g., `[HN](hn-url), [Lobsters](lobsters-url)`), per the source-rendering rule below.
 
 #### Step 5 — Classify candidates
 
@@ -113,7 +114,35 @@ Evaluate each candidate against the interests file. Prefer batching: send all ca
 
 Marginal calls should err toward **skip** — the user prefers a tight feed over a noisy one. Political commentary, sensationalism, punditry, and thin rewrites are always skip unless `interests.md` explicitly says otherwise.
 
-#### Step 6 — Summarize keepers
+#### Step 6 — Detect paywalls and find alternates
+
+For each candidate where `keep` is true **and** `pre_summarized` is **false** (1440 blurbs skip this step), check whether the article URL points to a paywalled site. If yes, look for the same story at a non-paywalled source and swap to it before summarizing.
+
+**What counts as paywalled.** The `paywall_domains` array from Step 2 lists the user's paywalled sites (each entry has a `url` like `https://www.nytimes.com`). Extract each entry's host (lowercased, leading `www.` stripped — e.g., `nytimes.com`) into a set. A candidate is paywalled if its `url` field, parsed the same way, matches one of these hosts (exact host match or subdomain — e.g., both `nytimes.com` and `cooking.nytimes.com` count).
+
+**Preferred alternates.** The `alternates` array from Step 2 lists non-paywalled sources the user prefers when looking for an alternate. Extract their hosts the same way (lowercased, leading `www.` stripped). Treat the order as the user's preference order. If the array is empty, there is no preference list — pick from any non-paywalled result.
+
+**Procedure** for each paywalled candidate:
+
+1. Load `WebSearch` if not already available:
+   ```
+   ToolSearch(query="select:WebSearch")
+   ```
+2. Run `WebSearch` with the article's `title` as the query. If the title is fewer than 6 words or feels generic, append the most distinctive proper noun or phrase from the candidate's `description`. Ask for the top ~10 results.
+3. Filter the results:
+   - **Drop** any result whose host matches a paywall domain (including the original).
+   - **Drop** aggregator/clickbait domains: `news.google.com`, `news.yahoo.com`, `flipboard.com`, `medium.com`, generic `*.substack.com` (unless the user has explicitly listed that subdomain as an alternate).
+4. From the remaining results, pick:
+   - First, the highest-ranked result whose host matches one of the user's preferred alternates (in the user's preference order).
+   - Otherwise, the highest-ranked remaining result whose title plausibly covers the same story (substantive headline overlap, not just shared keywords). When in doubt, skip to the next result rather than guessing.
+5. **If a match is found**, attach two fields to the candidate and leave its original `url` field alone:
+   - `alternate_url`: the alternate URL (Step 7 fetches this instead of `url`)
+   - `original_paywalled_url`: the candidate's original `url` (Step 8 cites this on the "Via" line)
+6. **If no usable match is found**, attach `alternate_searched: true` and `alternate_found: false`. Step 7 will still try the original URL — `WebFetch`'s prompt already handles paywalled pages gracefully by summarizing the visible dek/excerpt.
+
+Run multiple paywalled candidates' searches in parallel (separate `WebSearch` calls in the same message) when there's more than one to keep latency down.
+
+#### Step 7 — Summarize keepers
 
 For each candidate where `keep` is true:
 
@@ -123,11 +152,12 @@ For each candidate where `keep` is true:
      ```
      ToolSearch(query="select:WebFetch")
      ```
-  2. Fetch the article URL with this prompt (verbatim): `Read this article and return a 2-4 sentence neutral summary of its substantive content. Ignore navigation, ads, related links, and comments. Do not repeat the title and do not editorialize. If the page is paywalled and only a dek/excerpt is visible, briefly note that and summarize what is visible.`
-  3. **Use WebFetch's response as the summary** — do not re-summarize it in the main context (the article body should never enter your context; that's the point). If the response is clearly malformed (well over 4 sentences, contains nav/UI cruft, or just echoes the title), trim/clean it once and move on; otherwise pass it through verbatim.
-  4. If WebFetch fails outright (network error, 404, timeout), fall back to a 2-4 sentence summary written from the candidate's RSS `description` field and append " *(summary from feed description)*" to the end so the user knows the article wasn't reachable.
+  2. Choose the fetch URL: if Step 6 set `alternate_url` on the candidate, use that; otherwise use the candidate's `url`.
+  3. Fetch with this prompt (verbatim): `Read this article and return a 2-4 sentence neutral summary of its substantive content. Ignore navigation, ads, related links, and comments. Do not repeat the title and do not editorialize. If the page is paywalled and only a dek/excerpt is visible, briefly note that and summarize what is visible.`
+  4. **Use WebFetch's response as the summary** — do not re-summarize it in the main context (the article body should never enter your context; that's the point). If the response is clearly malformed (well over 4 sentences, contains nav/UI cruft, or just echoes the title), trim/clean it once and move on; otherwise pass it through verbatim.
+  5. If WebFetch fails outright (network error, 404, timeout), fall back to a 2-4 sentence summary written from the candidate's RSS `description` field and append " *(summary from feed description)*" to the end so the user knows the article wasn't reachable. If you fell back specifically because the **alternate** URL failed, append " *(alternate fetch failed; summary from feed description)*" instead — the original was paywalled, so going back to it isn't useful.
 
-#### Step 7 — Write digest
+#### Step 8 — Write digest
 
 Create `$PAPERBOY_VAULT_DIR/feed/YYYY-MM-DD-HHMMSS.md` where the timestamp is the current local time at invocation (fetch time, not content time). Use this structure:
 
@@ -151,6 +181,8 @@ Fetched N candidates across M sources, kept K.
 ...
 ```
 
+**Article heading link.** If the candidate has `alternate_url`, the heading links to the alternate URL (that's the readable copy). Otherwise it links to the candidate's `url`.
+
 Order items: most recently published first; items with unknown publish date go at the end.
 
 **Unsupported-source notice:** if `unsupported_sources` from Step 2 is non-empty, insert a notice block immediately after the "Fetched N candidates..." line and before the first `---` divider. Format:
@@ -166,6 +198,11 @@ List every slug in `unsupported_sources`, comma-separated, each in backticks. Om
 - If the candidate has a `discussion_url` field, link the friendly name to that URL: `[HN](https://news.ycombinator.com/item?id=...)`. (For HN/Lobsters this is the post's discussion page; for 1440 it's the newsletter page; for Reddit it's the comments page.)
 - If `discussion_url` is absent (e.g., CSM), render the friendly name as plain text.
 - For cross-source dedup entries covering the same article across multiple discussion sites, render each source separately, each linked to its own discussion page: `[HN](hn-url), [Lobsters](lobsters-url)`.
+
+**Alternate-source rendering** (only when `alternate_url` is set):
+- Append a `· **Via:** [<alt-host>](<alternate-url>) (original [<orig-host>](<original-paywalled-url>) is paywalled)` segment to the **Source:** line.
+- `<alt-host>` and `<orig-host>` are the URLs' registrable hosts (lowercased, leading `www.` stripped — e.g., `apnews.com`, `nytimes.com`).
+- If `alternate_searched: true` was set but `alternate_found: false` (no usable alternate was found), append `· **Note:** paywalled (no alternate found)` instead. The article heading still links to the original `url`.
 
 **Pre-summarized item rendering (1440):**
 - The `description` already contains inline `[link text](url)` citations as part of the body — render it verbatim (do NOT rewrite the inline link text).
@@ -190,7 +227,7 @@ Also include a collapsed "Skipped" section at the bottom listing every skipped i
 
 Use the candidate's `url` field for the link — same URL that would have been used if the item were kept.
 
-#### Step 8 — Finalize state
+#### Step 9 — Finalize state
 
 Build a JSON object mapping each source slug to the list of ALL candidate IDs from that source (both kept and skipped — we don't want skipped items to resurface either). Pipe it to the finalize script:
 
@@ -200,17 +237,18 @@ echo '{"hn-frontpage": ["id1", "id2"], ...}' | python3 "${CLAUDE_SKILL_DIR}/scri
 
 Finalize updates each `state/<slug>.json` with new seen IDs, caps seen lists to most recent 2000 per source, and records `last_fetched_at`.
 
-#### Step 9 — Report to user
+#### Step 10 — Report to user
 
 Tell the user:
 - Where the digest was written (full path)
 - Count of kept vs skipped
+- If any keepers were rerouted through an alternate source: how many, e.g., "3 paywalled stories used alternate sources." (Single-sentence summary — the digest itself shows which ones via the **Via:** line.)
 - Any source fetch errors
 - **If `unsupported_sources` is non-empty:** explicitly state which source slug(s) paperboy couldn't handle and direct the user to <https://github.com/rezrov/claude-marketplace/issues> to request official support. This duplicates the digest notice intentionally — the user sees it in chat whether or not they open the digest.
 
 Do not open the file or summarize its contents — the user will read it in Obsidian.
 
-#### Step 10 — Open the vault in Obsidian (conditional)
+#### Step 11 — Open the vault in Obsidian (conditional)
 
 Run this step **only** if the user's request expressed intent to view the digest — phrasings like "show it to me", "show me", "open it", "and open it in Obsidian", "let me see it", etc. Skip otherwise.
 
@@ -233,9 +271,11 @@ This launches/focuses Obsidian on the vault using its registered name (the vault
 
 - **Vault missing**: run init.py, offer to let user review seeds before continuing
 - **Source fetch fails (network/parse)**: skip source, record in `errors[]`, continue — do not fail the run
-- **Unsupported source** (unknown `type`, parse mismatch, structural extraction failure): track in `unsupported_sources`; surface in the digest's top notice (Step 7) and the chat report (Step 9) with a link to <https://github.com/rezrov/claude-marketplace/issues> to request official support. Never blocks other sources.
+- **Unsupported source** (unknown `type`, parse mismatch, structural extraction failure): track in `unsupported_sources`; surface in the digest's top notice (Step 8) and the chat report (Step 10) with a link to <https://github.com/rezrov/claude-marketplace/issues> to request official support. Never blocks other sources.
 - **Classifier output malformed**: re-prompt once, then skip that candidate with "classifier error" rationale
 - **Article fetch fails**: fall back to RSS description; note "summary from feed description" in the digest
+- **Alternate fetch fails** (Step 6 found an alternate but Step 7's WebFetch on it errors): fall back to the RSS description with the note "alternate fetch failed; summary from feed description". Do NOT try the original paywalled URL — it was bypassed for a reason.
+- **WebSearch returns no usable alternate**: leave the candidate pointing at its original paywalled URL; WebFetch's standard "paywalled, summarizing the visible excerpt" behavior applies. Note in the digest with "paywalled (no alternate found)".
 - **Digest write fails**: do NOT call finalize — next run will re-fetch the same items
 
 ### Notes
@@ -245,6 +285,7 @@ This launches/focuses Obsidian on the vault using its registered name (the vault
 - **Backfill window is a crawl bound, not a filter.** Items older than `PAPERBOY_BACKFILL_DAYS` that appear in a feed today are ignored — otherwise a source reshuffling its archive would flood the digest.
 - **First run is capped** to items with a known publish date within the backfill window, to avoid dumping a source's entire feed on day one.
 - **Dedup across sources**: HN and Lobsters often post the same external URL. If two candidates share a URL, keep the one with the earliest known publish date and note both sources in the digest entry. 1440 blurbs are NOT URL-deduped against RSS sources — they're a curated pre-summary that adds value even when overlapping topically.
-- **Reddit posts are polymorphic.** fetch.py routes the candidate's `url` to whatever WebFetch can actually summarize: external sites for link posts, `old.reddit.com/<permalink>` for self-text/image/video posts (the discussion page is where the substance lives, and old.reddit is more scrape-friendly than the JS-heavy new UI). The agent does not need special handling — Step 6's WebFetch prompt asks for a 2–4 sentence summary regardless of payload shape. For image-only posts, the resulting summary may effectively describe the title plus what's visible on the page; that's the best available given a Reddit post that is itself just a picture.
+- **Reddit posts are polymorphic.** fetch.py routes the candidate's `url` to whatever WebFetch can actually summarize: external sites for link posts, `old.reddit.com/<permalink>` for self-text/image/video posts (the discussion page is where the substance lives, and old.reddit is more scrape-friendly than the JS-heavy new UI). The agent does not need special handling — Step 7's WebFetch prompt asks for a 2–4 sentence summary regardless of payload shape. For image-only posts, the resulting summary may effectively describe the title plus what's visible on the page; that's the best available given a Reddit post that is itself just a picture.
 - **No subagents.** Everything runs in the main context — fetches are cheap, classification benefits from the interests file being in context, summarization is per-item WebFetch + write.
 - **Do not modify `interests.md` or `sources.md` automatically.** The user owns those files.
+- **Paywall handling is policy-respecting, not paywall-bypassing.** Paperboy never tries to bypass a paywall. It just looks for the same news story at a non-paywalled source (typically wire services like AP, Reuters, BBC, NPR, or the user's listed alternates) and summarizes from that. If no alternate exists, the original URL stands.
