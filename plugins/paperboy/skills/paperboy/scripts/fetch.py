@@ -2,8 +2,8 @@
 """Paperboy fetch helper.
 
 Reads sources.md from the vault, fetches each source according to its type,
-diffs against per-source state, and emits new candidates as JSON on stdout.
-Does not modify state.
+diffs against per-source state, collapses exact-URL duplicates, and emits new
+candidates as JSON on stdout. Does not modify state.
 
 Supported source types:
   - rss            : standard RSS 2.0 feed
@@ -22,29 +22,41 @@ Supported source types:
 
 Output schema:
   {
+    "paperboy_version": "<x.y.z>",
     "fetched_at": "<ISO 8601 UTC>",
     "vault": "<vault path>",
+    "manifest_path": "<path the finalize step reads>",
+    "counts": {"raw": N, "candidates": N, "url_duplicates_merged": N, ...},
     "candidates": [
       {
-        "source": "<slug>",
-        "id": "<guid or synthetic>",
+        "n": 1,                                  # short handle for classify output
         "title": "<title>",
-        "url": "<article URL>",
-        "discussion_url": "<URL or absent>",   # set when the source has a discussion page
-        "published": "<raw pubDate or ISO>",
+        "url": "<article URL, tracking params stripped>",
+        "sources": [ {"slug": "<slug>", "discussion_url": "<url or absent>"}, ... ],
         "pub_iso": "<ISO 8601 or null>",
-        "description": "<summary or full body>",
-        "pre_summarized": <bool>,              # absent or true; true means skip WebFetch
-        "citations": [["<text>", "<url>"], ...] # absent unless pre_summarized
+        "pub_precision": "datetime" | "date" | "unknown",
+        "description": "<dek / body signal>",
+        "pre_summarized": true,                  # absent unless true (1440 blurbs)
+        "citations": [["<text>", "<url>"], ...]  # absent unless pre_summarized
       },
       ...
     ],
-    "errors": [ { "source": "<slug>", "error": "<message>" }, ... ]
+    "recent_stories": [ {"key","headline","first_seen","last_seen","gist"}, ... ],
+    "errors":   [ {"source","kind","message"}, ... ],
+    "warnings": [ {"kind","source","message"}, ... ],
+    "alternates": [...], "paywall_domains": [...]
   }
+
+Item IDs are NOT in the candidate list. Every fetched ID is written to the
+manifest file instead, and finalize.py reads it directly -- the agent never has
+to echo ~150 opaque IDs back, which removes both the token cost and a class of
+transcription bug.
 """
 import json
 import os
+import socket
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -53,11 +65,14 @@ from xml.etree import ElementTree as ET
 
 # Ensure sibling modules in this directory are importable
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _common  # noqa: E402
 import parser_1440  # noqa: E402
 
-VAULT = Path(os.environ.get("PAPERBOY_VAULT_DIR", os.path.expanduser("~/Documents/PaperboyVault")))
+VAULT = _common.VAULT
 BACKFILL_DAYS = int(os.environ.get("PAPERBOY_BACKFILL_DAYS", "7"))
-USER_AGENT = "Paperboy/1.1 (+https://github.com/anthropics/claude-code)"
+STORY_WINDOW_DAYS = int(os.environ.get("PAPERBOY_STORY_WINDOW_DAYS", "7"))
+SEEN_CAP = int(os.environ.get("PAPERBOY_SEEN_CAP", "2000"))
+USER_AGENT = _common.user_agent()
 SITEMAP_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
 # RSS descriptions are only used as classifier signal (and as a fallback summary
 # if WebFetch fails). Some feeds embed the full article body, which bloats the
@@ -69,7 +84,7 @@ RSS_DESC_MAX_CHARS = 600
 def parse_sources_md(path: Path) -> tuple[list[dict], list[dict], list[dict]]:
     """Returns (active_sources, alternates, paywall_domains).
 
-    Entries with type 'alternate' or 'paywall' are not scanned for news —
+    Entries with type 'alternate' or 'paywall' are not scanned for news --
     they are passed through to the JSON output so the agent can consult them
     in the paywall-handling step.
     """
@@ -79,7 +94,7 @@ def parse_sources_md(path: Path) -> tuple[list[dict], list[dict], list[dict]]:
         if not line or line.startswith("#") or not line.startswith("-"):
             continue
         body = line[1:].strip()
-        parts = [p.strip() for p in body.split("|")]
+        parts = [p.strip().strip("`") for p in body.split("|")]
         if len(parts) < 3:
             continue
         entry = {"slug": parts[0], "url": parts[1], "type": parts[2]}
@@ -103,11 +118,30 @@ def _truncate_desc(s: str) -> str:
     return s[:RSS_DESC_MAX_CHARS].rstrip() + "…"
 
 
+def classify_fetch_error(e: Exception) -> str:
+    """Map a fetch exception onto a kind the agent can act on without guessing.
+
+    transient   -- retry later, nothing to do
+    config      -- the URL in sources.md looks wrong (404/410)
+    blocked     -- the origin refused us (401/403); source may need replacing
+    unsupported -- paperboy's tooling can't handle this source
+    """
+    if isinstance(e, urllib.error.HTTPError):
+        if e.code in (404, 410):
+            return "config"
+        if e.code in (401, 403):
+            return "blocked"
+        return "transient"
+    if isinstance(e, (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError)):
+        return "transient"
+    return "transient"
+
+
 def parse_rss(xml_text: str) -> list[dict]:
     root = ET.fromstring(xml_text)
     items = []
     for item in root.iter("item"):
-        link = _text(item, "link")
+        link = _common.strip_tracking(_text(item, "link"))
         guid = _text(item, "guid") or link
         items.append({
             "id": guid,
@@ -144,32 +178,32 @@ def parse_iso_date(s: str):
         return None
 
 
-def load_state(path: Path) -> dict:
-    if path.exists():
-        try:
-            return json.loads(path.read_text())
-        except json.JSONDecodeError:
-            pass
-    return {"seen_ids": [], "last_fetched_at": None}
-
-
 def fetch_url(url: str) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=30) as resp:
         return resp.read().decode("utf-8", errors="replace")
 
 
-def fetch_rss_source(source, seen, cutoff_dt, is_first_run):
+def fetch_rss_source(source, seen, cutoff_dt, is_first_run, warnings):
     candidates, errors = [], []
     slug = source["slug"]
     try:
         xml_text = fetch_url(source["url"])
     except Exception as e:
-        return [], [{"source": slug, "error": f"fetch: {e}"}]
+        return [], [{"source": slug, "kind": classify_fetch_error(e), "message": f"fetch: {e}"}]
     try:
         items = parse_rss(xml_text)
     except ET.ParseError as e:
-        return [], [{"source": slug, "error": f"parse: {e}"}]
+        # Declared as rss but doesn't parse as RSS -- Atom, HTML, or an error page.
+        return [], [{"source": slug, "kind": "unsupported",
+                     "message": f"declared type 'rss' but the body did not parse as RSS 2.0: {e}"}]
+
+    if not items:
+        warnings.append({
+            "kind": "empty-feed", "source": slug,
+            "message": "feed fetched and parsed but contained zero <item> entries "
+                       "(feed may have moved or changed format)",
+        })
 
     for item in items:
         if not item["id"] or item["id"] in seen:
@@ -181,6 +215,7 @@ def fetch_rss_source(source, seen, cutoff_dt, is_first_run):
             continue
         item["source"] = slug
         item["pub_iso"] = pub.isoformat() if pub else None
+        item["pub_precision"] = "datetime" if pub else "unknown"
         # If the guid is itself a URL, treat it as the discussion page
         # (HN/Lobsters' guids are post URLs; CSM's are opaque hashes).
         if item["id"].startswith(("http://", "https://")):
@@ -189,17 +224,19 @@ def fetch_rss_source(source, seen, cutoff_dt, is_first_run):
     return candidates, errors
 
 
-def fetch_1440_sitemap_source(source, seen, cutoff_dt, is_first_run):
+def fetch_1440_sitemap_source(source, seen, cutoff_dt, is_first_run, warnings):
     candidates, errors = [], []
     slug = source["slug"]
     try:
         sitemap_xml = fetch_url(source["url"])
     except Exception as e:
-        return [], [{"source": slug, "error": f"fetch sitemap: {e}"}]
+        return [], [{"source": slug, "kind": classify_fetch_error(e),
+                     "message": f"fetch sitemap: {e}"}]
     try:
         root = ET.fromstring(sitemap_xml)
     except ET.ParseError as e:
-        return [], [{"source": slug, "error": f"parse sitemap: {e}"}]
+        return [], [{"source": slug, "kind": "unsupported",
+                     "message": f"sitemap did not parse as XML: {e}"}]
 
     pages = []
     for url_el in root.findall(f"{SITEMAP_NS}url"):
@@ -212,40 +249,63 @@ def fetch_1440_sitemap_source(source, seen, cutoff_dt, is_first_run):
             continue
         if pub < cutoff_dt:
             continue
-        pages.append((loc, pub))
+        # 1440's sitemap carries date-granularity lastmod (always T00:00:00Z).
+        # Flag it so the digest can say "2026-09-17" instead of inventing a time.
+        precision = "date" if (pub.hour, pub.minute, pub.second) == (0, 0, 0) else "datetime"
+        pages.append((loc, pub, precision))
+
+    if not pages:
+        warnings.append({
+            "kind": "empty-feed", "source": slug,
+            "message": f"sitemap parsed but listed no /newsletter/ pages inside the "
+                       f"{BACKFILL_DAYS}-day window",
+        })
 
     pages.sort(key=lambda x: x[1], reverse=True)
 
-    for page_url, pub in pages:
+    for page_url, pub, precision in pages:
         try:
             page_html = fetch_url(page_url)
         except Exception as e:
-            errors.append({"source": slug, "error": f"fetch {page_url}: {e}"})
+            errors.append({"source": slug, "kind": classify_fetch_error(e),
+                           "message": f"fetch {page_url}: {e}"})
             continue
+        diagnostics = []
         try:
-            blurbs = parser_1440.extract_newsletter_blurbs(page_html)
+            blurbs = parser_1440.extract_newsletter_blurbs(page_html, diagnostics)
         except Exception as e:
-            errors.append({"source": slug, "error": f"parse {page_url}: {e}"})
+            errors.append({"source": slug, "kind": "unsupported",
+                           "message": f"parse {page_url}: {e}"})
             continue
 
         page_slug = page_url.rstrip("/").rsplit("/", 1)[-1]
+
+        # A page that yields nothing used to fail silently. Surface it: either
+        # the newsletter template changed or the section markers moved.
+        if not blurbs:
+            warnings.append({
+                "kind": "no-blurbs", "source": slug,
+                "message": f"{page_slug}: extracted 0 blurbs "
+                           f"({'; '.join(diagnostics) or 'no diagnostics'}) -- "
+                           "the 1440 template may have changed",
+            })
+
         for b in blurbs:
             cid = f"{page_slug}:{b['blurb_slug']}"
             if cid in seen:
                 continue
-            cand = {
+            candidates.append({
                 "source": slug,
                 "id": cid,
                 "title": b["title"],
                 "url": page_url,
                 "discussion_url": page_url,
-                "published": pub.isoformat(),
                 "pub_iso": pub.isoformat(),
+                "pub_precision": precision,
                 "description": b["description"],
                 "pre_summarized": True,
                 "citations": b["citations"],
-            }
-            candidates.append(cand)
+            })
 
     return candidates, errors
 
@@ -259,10 +319,10 @@ def _reddit_json_url(url: str) -> str:
     """Convert a subreddit listing URL into its .json equivalent.
 
     Examples:
-      .../r/Foo/top/    → .../r/Foo/top.json?t=day&limit=25
-      .../r/Foo/hot/    → .../r/Foo/hot.json?limit=25
-      .../r/Foo/        → .../r/Foo/top.json?t=day&limit=25  (default)
-      .../r/Foo/x.json? → returned as-is
+      .../r/Foo/top/    -> .../r/Foo/top.json?t=day&limit=25
+      .../r/Foo/hot/    -> .../r/Foo/hot.json?limit=25
+      .../r/Foo/        -> .../r/Foo/top.json?t=day&limit=25  (default)
+      .../r/Foo/x.json? -> returned as-is
     """
     base = url.split("?", 1)[0].rstrip("/")
     if base.endswith(".json"):
@@ -315,7 +375,7 @@ def parse_reddit_listing(json_text: str) -> list[dict]:
         if is_self or domain.startswith("self.") or _reddit_is_media_post(post_hint, is_video, domain):
             article_url = old_url
         else:
-            article_url = external_url or old_url
+            article_url = _common.strip_tracking(external_url) or old_url
 
         # Description gives the classifier its body signal. For self-posts the
         # selftext IS the post; include a preview alongside the title.
@@ -336,25 +396,32 @@ def parse_reddit_listing(json_text: str) -> list[dict]:
             "title": title,
             "url": article_url,
             "discussion_url": discussion_url,
-            "published": pub_iso or "",
             "pub_iso": pub_iso,
+            "pub_precision": "datetime" if pub_iso else "unknown",
             "description": _truncate_desc(description),
         })
     return items
 
 
-def fetch_reddit_source(source, seen, cutoff_dt, is_first_run):
+def fetch_reddit_source(source, seen, cutoff_dt, is_first_run, warnings):
     candidates, errors = [], []
     slug = source["slug"]
     json_url = _reddit_json_url(source["url"])
     try:
         json_text = fetch_url(json_url)
     except Exception as e:
-        return [], [{"source": slug, "error": f"fetch: {e}"}]
+        return [], [{"source": slug, "kind": classify_fetch_error(e), "message": f"fetch: {e}"}]
     try:
         items = parse_reddit_listing(json_text)
     except (json.JSONDecodeError, KeyError, ValueError) as e:
-        return [], [{"source": slug, "error": f"parse: {e}"}]
+        return [], [{"source": slug, "kind": "unsupported",
+                     "message": f"listing did not parse as a reddit JSON listing: {e}"}]
+
+    if not items:
+        warnings.append({
+            "kind": "empty-feed", "source": slug,
+            "message": "listing fetched and parsed but contained zero usable posts",
+        })
 
     for item in items:
         if item["id"] in seen:
@@ -376,49 +443,202 @@ SOURCE_HANDLERS = {
 }
 
 
+def collapse_duplicates(raw: list[dict]) -> tuple[list[dict], int]:
+    """Merge candidates that point at the same article URL.
+
+    HN front page / HN newest / Lobsters hot / Lobsters new routinely carry the
+    same external link; ~13% of a day's raw items are exact-URL repeats. Merging
+    here means the classifier never sees them twice and the digest renders one
+    entry with a combined source list.
+
+    Pre-summarized (1440) blurbs are never merged -- they are standalone curated
+    entries whose value survives topical overlap.
+    """
+    merged: dict[str, dict] = {}
+    order: list[str] = []
+    dupes = 0
+
+    for item in raw:
+        pre = bool(item.get("pre_summarized"))
+        key = f"1440:{item['source']}:{item['id']}" if pre else _common.dedup_key(item["url"])
+        if not key:
+            key = f"noid:{item['source']}:{item['id']}"
+
+        src = {"slug": item["source"]}
+        if item.get("discussion_url"):
+            src["discussion_url"] = item["discussion_url"]
+
+        if key not in merged:
+            entry = {
+                "title": item.get("title") or "",
+                "url": item["url"],
+                "sources": [src],
+                "pub_iso": item.get("pub_iso"),
+                "pub_precision": item.get("pub_precision", "unknown"),
+                "description": item.get("description") or "",
+            }
+            if pre:
+                entry["pre_summarized"] = True
+                entry["citations"] = item.get("citations", [])
+            merged[key] = entry
+            order.append(key)
+            continue
+
+        dupes += 1
+        e = merged[key]
+        # Earliest known publish time wins; a known time beats no time at all.
+        if item.get("pub_iso") and (e["pub_iso"] is None or item["pub_iso"] < e["pub_iso"]):
+            e["pub_iso"] = item["pub_iso"]
+            e["pub_precision"] = item.get("pub_precision", "unknown")
+        # Longest non-empty title / description carry the most signal.
+        if len(item.get("title") or "") > len(e["title"]):
+            e["title"] = item["title"]
+        if len(item.get("description") or "") > len(e["description"]):
+            e["description"] = item["description"]
+        if not any(s["slug"] == src["slug"] for s in e["sources"]):
+            e["sources"].append(src)
+
+    out = [merged[k] for k in order]
+    return out, dupes
+
+
+def load_recent_stories(warnings: list) -> list[dict]:
+    """Stories kept in the last STORY_WINDOW_DAYS, for cross-day repeat detection."""
+    path = _common.STATE_DIR / "stories.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        warnings.append({
+            "kind": "state-corrupt", "source": "stories",
+            "message": f"stories.json is unreadable ({e.__class__.__name__}); "
+                       "cross-day repeat detection is inactive this run",
+        })
+        return []
+    stories = data.get("stories", []) if isinstance(data, dict) else []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=STORY_WINDOW_DAYS)).date().isoformat()
+    recent = [s for s in stories if isinstance(s, dict) and (s.get("last_seen") or "") >= cutoff]
+    recent.sort(key=lambda s: s.get("last_seen") or "", reverse=True)
+    return recent
+
+
 def main() -> int:
+    warnings: list[dict] = []
+
     if not VAULT.exists():
-        print(f"ERROR: Vault not found at {VAULT}", file=sys.stderr)
+        print(f"paperboy: ERROR [config] vault: not found at {VAULT}", file=sys.stderr)
         return 1
     sources_md = VAULT / "sources.md"
     if not sources_md.exists():
-        print(f"ERROR: {sources_md} not found — run init.py first", file=sys.stderr)
+        print(f"paperboy: ERROR [config] vault: {sources_md} not found -- run init.py first",
+              file=sys.stderr)
         return 1
-    state_dir = VAULT / "state"
-    state_dir.mkdir(exist_ok=True)
+    state_dir = _common.STATE_DIR
+    state_dir.mkdir(parents=True, exist_ok=True)
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_DAYS)
-    candidates: list[dict] = []
+    raw: list[dict] = []
     errors: list[dict] = []
+    manifest: dict[str, list[str]] = {}
 
     sources, alternates, paywall_domains = parse_sources_md(sources_md)
+
+    if not sources:
+        warnings.append({"kind": "no-sources", "source": "sources.md",
+                         "message": "no active sources found in sources.md"})
+
+    # v1.2 added paywall/alternate handling, but a vault initialized before that
+    # never received the new sections and init.py won't overwrite an existing
+    # file -- so the feature sits inert with no signal. Say so.
+    if not paywall_domains:
+        warnings.append({
+            "kind": "no-paywall-config", "source": "sources.md",
+            "message": "no `paywall` entries in sources.md, so paywall detection and "
+                       "alternate-source lookup cannot run. Run "
+                       "`python3 init.py --migrate` to append the current defaults.",
+        })
+    elif not alternates:
+        warnings.append({
+            "kind": "no-alternates-config", "source": "sources.md",
+            "message": "paywall entries exist but no `alternate` entries, so alternate "
+                       "lookup has no preference list. Run `python3 init.py --migrate`.",
+        })
 
     for source in sources:
         slug = source["slug"]
         handler = SOURCE_HANDLERS.get(source.get("type", "rss"))
         if handler is None:
-            errors.append({"source": slug, "error": f"unsupported type: {source.get('type')}"})
+            errors.append({
+                "source": slug, "kind": "unsupported",
+                "message": f"declared type '{source.get('type')}' is not one of "
+                           f"{', '.join(sorted(SOURCE_HANDLERS))}",
+            })
             continue
 
-        state = load_state(state_dir / f"{slug}.json")
+        state = _common.load_state(state_dir / f"{slug}.json", warnings)
         seen = set(state.get("seen_ids", []))
         is_first_run = not seen
 
-        cands, errs = handler(source, seen, cutoff, is_first_run)
-        candidates.extend(cands)
-        errors.extend(errs)
+        cands, errs = handler(source, seen, cutoff, is_first_run, warnings)
 
-    candidates.sort(key=lambda c: c["pub_iso"] or "", reverse=True)
+        # A seen list pinned at the cap only matters if this source's actual
+        # publishing rate would overflow the cap inside the backfill window --
+        # otherwise the cap can never drop an item that is still fetchable.
+        # Using this run's new-item count as the daily rate proxy keeps a
+        # steady 20-items/day feed from warning every single run.
+        if len(seen) >= SEEN_CAP and len(cands) * BACKFILL_DAYS > SEEN_CAP:
+            warnings.append({
+                "kind": "seen-cap-pressure", "source": slug,
+                "message": f"seen-id list is at the {SEEN_CAP} cap and this run added "
+                           f"{len(cands)} items; at that rate the cap covers less than "
+                           f"the {BACKFILL_DAYS}-day backfill window, so previously-seen "
+                           f"items can resurface. Raise PAPERBOY_SEEN_CAP.",
+            })
+        raw.extend(cands)
+        errors.extend(errs)
+        manifest.setdefault(slug, []).extend([c["id"] for c in cands if c.get("id")])
+
+    raw.sort(key=lambda c: c.get("pub_iso") or "", reverse=True)
+    candidates, dupes = collapse_duplicates(raw)
+    for i, c in enumerate(candidates, 1):
+        c["n"] = i
+
+    # The manifest is how finalize.py learns what to mark seen. Writing it here
+    # (rather than making the agent echo every ID back) keeps ~150 opaque
+    # strings out of the context window entirely.
+    manifest_path = Path(_common.DEFAULT_MANIFEST)
+    try:
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+    except OSError as e:
+        warnings.append({
+            "kind": "manifest-write-failed", "source": "manifest",
+            "message": f"could not write {manifest_path} ({e}); finalize will need "
+                       "the seen-id map piped in explicitly",
+        })
 
     result = {
+        "paperboy_version": _common.version(),
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "vault": str(VAULT),
+        "manifest_path": str(manifest_path),
+        "counts": {
+            "sources_configured": len(sources),
+            "sources_failed": len({e["source"] for e in errors}),
+            "raw_items": len(raw),
+            "url_duplicates_merged": dupes,
+            "candidates": len(candidates),
+        },
         "candidates": candidates,
+        "recent_stories": load_recent_stories(warnings),
         "errors": errors,
+        "warnings": warnings,
         "alternates": alternates,
         "paywall_domains": paywall_domains,
     }
     json.dump(result, sys.stdout, indent=2)
+
+    _common.emit_warnings(warnings, errors)
     return 0
 
 

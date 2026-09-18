@@ -29,3 +29,6 @@ venv/
 *.log
 *.tmp
 .cache/
+
+# Local, unpublished working notes (kept out of the public marketplace repo)
+local-notes/
