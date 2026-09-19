@@ -198,6 +198,34 @@ get_image_dims() {
   return 1
 }
 
+# --- decodability -----------------------------------------------------------
+#
+# kitten icat exits 0 even when it cannot decode the file, reporting the
+# problem only on stderr. Relying on its exit status would leave the user
+# staring at an empty overlay while the caller was told everything worked, so
+# stderr is the signal. A successful render writes nothing to it.
+
+# Echoes a cleaned-up message and returns 0 when icat's stderr reports a
+# failure; returns 1 when it is empty. Split out so it can be tested.
+icat_error_message() {
+  local err=${1:-}
+  err=$(printf '%s' "$err" | sed $'s/\033\[[0-9;]*m//g')
+  err=${err//$'\n'/ }
+  [[ -n ${err//[[:space:]]/} ]] || return 1
+  printf '%s\n' "$err"
+}
+
+# Decode the image without a terminal, so an undecodable file is reported to
+# whoever invoked the script rather than inside an overlay that then vanishes.
+# --use-window-size avoids querying a terminal we do not have; the geometry is
+# a placeholder, since only the decode matters here.
+check_decodable() {
+  local f=$1 err=""
+  err=$(kitten icat --stdin no --transfer-mode stream \
+          --use-window-size 80,24,720,480 --place 10x5@0x0 "$f" 2>&1 >/dev/null || true)
+  icat_error_message "$err"
+}
+
 # --- terminal size ----------------------------------------------------------
 
 # Parse `stty size` output ("ROWS COLS") into "COLS ROWS", which is the order
@@ -333,9 +361,12 @@ overlay_show() {
 
   # --stdin no keeps icat from treating a redirected stdin as a second image,
   # which makes --place fail with a confusing "not 2" error.
-  kitten icat --stdin no --scale-up \
-    --place "${img_cols}x${img_rows}@${left}x${top}" "$img" \
-    || overlay_die "kitten icat could not display $img"
+  local icat_err="" msg=""
+  icat_err=$(kitten icat --stdin no --scale-up \
+    --place "${img_cols}x${img_rows}@${left}x${top}" "$img" 2>&1 >/dev/tty || true)
+  if msg=$(icat_error_message "$icat_err"); then
+    overlay_die "$msg"
+  fi
 
   # The keypress is always accepted, so a caller driving a timed sequence can
   # still be interrupted; only the advertisement of it is optional. Printing it
@@ -424,6 +455,11 @@ main() {
     size_note="${IMG_W}x${IMG_H}"
   else
     warn "could not determine the dimensions of $image_path; it will be displayed top-aligned rather than vertically centered"
+  fi
+
+  local decode_err=""
+  if decode_err=$(check_decodable "$image_path"); then
+    die "$decode_err"
   fi
 
   dismiss_overlay

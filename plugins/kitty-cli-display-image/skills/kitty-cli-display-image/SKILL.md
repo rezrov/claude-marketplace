@@ -30,8 +30,13 @@ ${CLAUDE_SKILL_DIR}/scripts/display.sh "<path_to_image>"
 Add `--no-prompt` before the path when driving a sequence of images yourself;
 see "Showing a sequence of images" below.
 
-`kitten icat` does the rendering, so any format it supports (PNG, JPEG, GIF,
-BMP, TIFF, WebP, SVG, PDF, …) works without conversion.
+`kitten icat` does the rendering. PNG, JPEG, GIF (including animated), BMP,
+TIFF and WebP work without conversion.
+
+**Vector and document formats do not work.** kitty's builtin decoder cannot
+read SVG or PDF, and says so on stderr; kitty documents an ImageMagick-backed
+engine that may cover more formats when ImageMagick is installed, which is
+untested here. Convert to PNG first if you need to show one.
 
 On success the script prints one line naming the file and its pixel size, and
 exits 0. **Check the exit status and relay any stderr to the user.** A non-zero
@@ -129,7 +134,9 @@ centered.
 
 The script reports failures on stderr and exits non-zero. Everything that can
 fail is checked before the overlay window opens, so errors reach the caller
-rather than disappearing with the window.
+rather than disappearing with the window. That includes decoding: the image is
+decoded once up front, because `kitten icat` exits 0 even when it cannot read
+a file and reports the problem only on stderr.
 
 | Message | Meaning |
 | --- | --- |
@@ -137,6 +144,7 @@ rather than disappearing with the window.
 | `KITTY_LISTEN_ON is not set` | Remote control isn't enabled, or kitty wasn't restarted after enabling it (see Requirements) |
 | `file not found` / `not a regular file` / `file is not readable` | Check the path |
 | `could not determine the dimensions` (warning) | Image is displayed, top-aligned instead of centered |
+| `Failed to process …: Could not render image to RGB` | kitty cannot decode this format (e.g. SVG, PDF). Convert to PNG and retry |
 
 If the overlay itself hits a problem (terminal too small, `icat` cannot decode
 the file), it prints the error in the overlay window and waits for a keypress

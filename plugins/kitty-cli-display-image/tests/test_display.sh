@@ -173,6 +173,30 @@ read -r hc hr hl ht <<<"$(compute_geometry 100 400 200 50 1800 950)"
 expected_left=$(( (200 - hc) / 2 ))
 assert_eq "horizontal centering when height binds" "$expected_left" "$hl"
 
+# --- icat_error_message -----------------------------------------------------
+# kitten icat exits 0 even when it cannot decode a file, reporting the problem
+# only on stderr. Checking its exit status left the user with a blank overlay
+# while the caller was told the image had been displayed.
+
+err_svg='Failed to process logo.svg: Could not render image to RGB: image: unknown format'
+assert_eq "decode failure is reported" "$err_svg" "$(icat_error_message "$err_svg")"
+
+icat_error_message "" >/dev/null 2>&1
+assert_fail "empty stderr is success" $?
+icat_error_message "   " >/dev/null 2>&1
+assert_fail "whitespace-only stderr is success" $?
+icat_error_message "$(printf '\n\n')" >/dev/null 2>&1
+assert_fail "newlines-only stderr is success" $?
+
+# kitty colorizes the filename in its errors; the codes must not reach the user.
+coloured=$(printf 'Failed to process \033[31mlogo.svg\033[39m: bad format')
+assert_eq "ansi codes stripped" "Failed to process logo.svg: bad format" \
+  "$(icat_error_message "$coloured")"
+
+# Multi-line stderr collapses to one line so it fits a single error message.
+multi=$(printf 'first problem\nsecond problem')
+assert_eq "multi-line collapsed" "first problem second problem" "$(icat_error_message "$multi")"
+
 # --- parse_stty_size --------------------------------------------------------
 # Regression: the script used `cols=$(tput cols)`, but tput reads the window
 # size via an ioctl on stdout, which a command substitution has turned into a

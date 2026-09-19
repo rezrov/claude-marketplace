@@ -45,8 +45,9 @@ scripts/display.sh --dismiss           # close it
 scripts/display.sh --help
 ```
 
-Any format `kitten icat` understands works, including PNG, JPEG, GIF, BMP,
-TIFF, WebP, SVG and PDF.
+PNG, JPEG, GIF (including animated), BMP, TIFF and WebP all work. SVG and PDF
+do **not**: kitty's builtin decoder cannot read them, and the script says so
+and exits non-zero rather than opening an empty overlay. Convert to PNG first.
 
 ## How it works
 
