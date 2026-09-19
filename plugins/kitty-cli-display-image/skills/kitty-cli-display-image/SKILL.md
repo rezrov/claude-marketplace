@@ -27,6 +27,9 @@ text underneath it.
 ${CLAUDE_SKILL_DIR}/scripts/display.sh "<path_to_image>"
 ```
 
+Add `--no-prompt` before the path when driving a sequence of images yourself;
+see "Showing a sequence of images" below.
+
 `kitten icat` does the rendering, so any format it supports (PNG, JPEG, GIF,
 BMP, TIFF, WebP, SVG, PDF, …) works without conversion.
 
@@ -52,6 +55,36 @@ ${CLAUDE_SKILL_DIR}/scripts/display.sh --dismiss
   `--dismiss`
 - `--dismiss` closes only the overlay this script opened, identified by the
   window id kitty reported at launch
+
+### Showing a sequence of images
+
+Pass `--no-prompt` when you control how long each image stays up. It hides the
+"press any key" hint, which would otherwise promise an interaction the user did
+not ask for, drawn directly under the image. The keypress still works, so the
+user can cut a slide short.
+
+Showing an image dismisses the previous one as a single step, so there is no
+need to dismiss between slides and no flash of empty terminal between them.
+Dismiss once at the end.
+
+Treat the overlay disappearing as "the user wants to move on" and advance
+immediately, rather than leaving them looking at an empty terminal for the rest
+of the interval. Time each slide against a wall clock rather than counting
+sleep iterations: each poll spawns a `kitten @ ls`, and the overhead accumulates
+into visible drift (about a second over five seconds when polling at 0.3s).
+
+```bash
+for img in "${images[@]}"; do
+  "${CLAUDE_SKILL_DIR}/scripts/display.sh" --no-prompt "$img" || continue
+  deadline=$(( $(date +%s) + 5 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep 0.3
+    # Overlay gone means the user pressed a key; go to the next image.
+    kitten @ ls 2>/dev/null | grep -q '"kitty-cli-display-image"' || break
+  done
+done
+"${CLAUDE_SKILL_DIR}/scripts/display.sh" --dismiss
+```
 
 ### Centering and unknown image sizes
 
