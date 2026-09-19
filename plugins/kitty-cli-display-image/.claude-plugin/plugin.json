@@ -1,7 +1,7 @@
 {
   "name": "kitty-cli-display-image",
   "description": "Display images in the terminal via the Kitty graphics protocol",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "author": {
     "name": "Ron Fritz"
   },

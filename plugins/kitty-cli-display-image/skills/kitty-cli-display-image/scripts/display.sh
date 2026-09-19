@@ -6,7 +6,10 @@
 # Requirements are kitty with remote control enabled, plus POSIX tools.
 set -euo pipefail
 
-VERSION="1.1.0"
+# Read from plugin.json so the reported version cannot drift from the manifest,
+# which is exactly what a hardcoded constant did between 1.1.0 and 1.1.2. The
+# constant is only reached when the script is used outside a plugin tree.
+FALLBACK_VERSION="1.1.3"
 OVERLAY_TITLE="kitty-cli-display-image"
 BORDER=2
 
@@ -85,6 +88,15 @@ self_path() {
     [[ $src == /* ]] || src="$dir/$src"
   done
   printf '%s/%s\n' "$(cd -P "$(dirname "$src")" && pwd)" "$(basename "$src")"
+}
+
+version() {
+  local f v=""
+  f="$(dirname "$(self_path)")/../../../.claude-plugin/plugin.json"
+  if [[ -r $f ]]; then
+    v=$(sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$f" | head -1)
+  fi
+  printf '%s\n' "${v:-$FALLBACK_VERSION}"
 }
 
 require_kitty() {
@@ -416,7 +428,7 @@ main() {
       exit 0
       ;;
     --version)
-      printf '%s %s\n' "$OVERLAY_TITLE" "$VERSION"
+      printf '%s %s\n' "$OVERLAY_TITLE" "$(version)"
       exit 0
       ;;
     --dismiss)

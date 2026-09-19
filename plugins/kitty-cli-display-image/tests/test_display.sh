@@ -173,6 +173,16 @@ read -r hc hr hl ht <<<"$(compute_geometry 100 400 200 50 1800 950)"
 expected_left=$(( (200 - hc) / 2 ))
 assert_eq "horizontal centering when height binds" "$expected_left" "$hl"
 
+# --- version ----------------------------------------------------------------
+# Regression: the version was a hardcoded constant and silently drifted from
+# plugin.json across the 1.1.0 -> 1.1.2 releases, so --version reported 1.1.0
+# from a 1.1.2 install. It is now read from the manifest.
+
+MANIFEST="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.claude-plugin/plugin.json"
+MANIFEST_VERSION=$(sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$MANIFEST" | head -1)
+assert_eq "version matches plugin.json" "$MANIFEST_VERSION" "$(version)"
+if [[ -n $MANIFEST_VERSION ]]; then ok; else bad "manifest version is readable" "got empty"; fi
+
 # --- icat_error_message -----------------------------------------------------
 # kitten icat exits 0 even when it cannot decode a file, reporting the problem
 # only on stderr. Checking its exit status left the user with a blank overlay
