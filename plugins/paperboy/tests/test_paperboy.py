@@ -30,6 +30,20 @@ import init as vault_init  # noqa: E402
 import parser_1440      # noqa: E402
 
 
+class Test1440Editions(unittest.TestCase):
+    def test_daily_digest_and_legacy_slugs_are_kept(self):
+        base = "https://join1440.com/newsletter/"
+        self.assertTrue(fetch.is_1440_daily_digest(base + "1440-dd-2026-10-09"))
+        self.assertTrue(fetch.is_1440_daily_digest(
+            base + "fed-rate-human-mouse-brains-and-toy-hall-of-fame"))
+
+    def test_weekly_topics_newsletters_are_skipped(self):
+        base = "https://join1440.com/newsletter/"
+        for code in ("bf", "sc", "st", "hm", "sun"):
+            self.assertFalse(fetch.is_1440_daily_digest(f"{base}1440-{code}-2026-10-06/"),
+                             code)
+
+
 class TestUrlHygiene(unittest.TestCase):
     def test_strips_tracking_params(self):
         self.assertEqual(

@@ -8,9 +8,10 @@ candidates as JSON on stdout. Does not modify state.
 Supported source types:
   - rss            : standard RSS 2.0 feed
   - 1440-sitemap   : 1440 newsletter; URL is a sitemap.xml that lists
-                     /newsletter/<slug> pages with <lastmod> dates. Each newsletter
-                     page is fetched and parsed into per-blurb candidates that
-                     come pre-summarized with citation links.
+                     /newsletter/<slug> pages with <lastmod> dates. Each Daily
+                     Digest page is fetched and parsed into per-blurb candidates
+                     that come pre-summarized with citation links. The weekly
+                     Topics newsletters in the same sitemap are skipped.
   - reddit-sub     : a subreddit listing. URL is a subreddit page like
                      https://www.reddit.com/r/<sub>/ (defaults to top-of-day);
                      append /hot/, /new/, /rising/, /top/, or /controversial/
@@ -54,6 +55,7 @@ transcription bug.
 """
 import json
 import os
+import re
 import socket
 import sys
 import urllib.error
@@ -224,6 +226,21 @@ def fetch_rss_source(source, seen, cutoff_dt, is_first_run, warnings):
     return candidates, errors
 
 
+def is_1440_daily_digest(page_url: str) -> bool:
+    """True if a 1440 sitemap URL is a Daily Digest edition.
+
+    Since Oct 2025 the sitemap also lists 1440's weekly Topics newsletters
+    (Business & Finance, Science & Technology, Society & Culture, Health &
+    Medicine, the Sunday edition) as /newsletter/1440-<code>-<YYYY-MM-DD>. Only
+    the Daily Digest ("dd") uses the layouts parser_1440 understands; the others
+    are long-form essays with no Need To Know / Quick Hits sections. Older pages
+    used free-form slugs and were all daily editions.
+    """
+    page_slug = page_url.rstrip("/").rsplit("/", 1)[-1]
+    m = re.fullmatch(r"1440-([a-z]+)-\d{4}-\d{2}-\d{2}", page_slug)
+    return m is None or m.group(1) == "dd"
+
+
 def fetch_1440_sitemap_source(source, seen, cutoff_dt, is_first_run, warnings):
     candidates, errors = [], []
     slug = source["slug"]
@@ -242,7 +259,7 @@ def fetch_1440_sitemap_source(source, seen, cutoff_dt, is_first_run, warnings):
     for url_el in root.findall(f"{SITEMAP_NS}url"):
         loc = (url_el.findtext(f"{SITEMAP_NS}loc") or "").strip()
         lastmod = (url_el.findtext(f"{SITEMAP_NS}lastmod") or "").strip()
-        if "/newsletter/" not in loc:
+        if "/newsletter/" not in loc or not is_1440_daily_digest(loc):
             continue
         pub = parse_iso_date(lastmod)
         if pub is None:
@@ -257,8 +274,8 @@ def fetch_1440_sitemap_source(source, seen, cutoff_dt, is_first_run, warnings):
     if not pages:
         warnings.append({
             "kind": "empty-feed", "source": slug,
-            "message": f"sitemap parsed but listed no /newsletter/ pages inside the "
-                       f"{BACKFILL_DAYS}-day window",
+            "message": f"sitemap parsed but listed no Daily Digest /newsletter/ pages "
+                       f"inside the {BACKFILL_DAYS}-day window (slug scheme may have changed)",
         })
 
     pages.sort(key=lambda x: x[1], reverse=True)

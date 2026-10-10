@@ -33,6 +33,12 @@ If a source starts failing after a UA change, revert first and re-measure before
 
 ## Deferred features
 
+### 1440 weekly Topics newsletters
+
+Since Oct 2025 the 1440 sitemap also lists weekly Topics newsletters alongside the Daily Digest, distinguished by slug: `1440-dd-<date>` (Daily Digest), `1440-bf-` (Business & Finance), `1440-st-` (Science & Technology), `1440-hm-` (Health & Medicine), `1440-sc-` (Society & Culture), `1440-sun-` (Sunday edition). `fetch.py` keeps only `dd` pages (and legacy free-form slugs). The Topics editions are a single long-form lead essay plus sections like "News in Context", "Research Spotlight", and "Cultural Context", and would need their own parser. Until 1.3.1 they were fed to `parser_1440.py`, which correctly reported "no known content section" for each one, producing several spurious `no-blurbs` warnings per run.
+
+**To add:** a per-vertical opt-in (e.g. a source-line option listing wanted codes), and a parser for the Topics layout that emits the lead essay and spotlight items as candidates.
+
 ### 1440 parser: In The Know section
 
 `parser_1440.py` extracts "Need To Know" (weekday) and "One Big Headline" + "Quick Hits" (weekend). "In The Know" is still unparsed: short bullet items grouped under category headers (Sports/Entertainment/Culture, Science & Technology, Business & Markets) with `>` prefixes and embedded "More" links, one or two related items per bullet separated by `|`.
